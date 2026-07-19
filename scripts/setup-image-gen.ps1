@@ -38,6 +38,7 @@ param(
     [string]$DataRoot  = 'C:\Atlas',
     [string]$HfToken   = $env:HF_TOKEN,
     [switch]$Include3D,
+    [switch]$IncludeVideo,
     [switch]$SkipModels
 )
 $ErrorActionPreference = 'Stop'
@@ -101,6 +102,22 @@ Get-Model 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main
 Get-Model 'https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors' 'models\vae' 'ae.safetensors'
 # Gated (higher-quality "quality"/"high" tiers) — needs HF license + token.
 Get-Model 'https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors' 'models\unet' 'flux1-dev.safetensors' $true
+
+# Video Studio (LTX-Video) — the checkpoint goes in models/checkpoints/; it reuses the T5 encoder above.
+# Text-to-video, image-to-video, and .webm output all use NATIVE ComfyUI LTXV nodes (no custom nodes).
+if ($IncludeVideo) {
+    Step 'Downloading the LTX-Video checkpoint (Video Studio)'
+    Get-Model 'https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltx-video-2b-v0.9.5.safetensors' 'models\checkpoints' 'ltx-video-2b-v0.9.5.safetensors'
+    # OPTIONAL: real .mp4 output (set image_gen:video_format=mp4) needs the VideoHelperSuite custom node +
+    # ffmpeg. The default output is .webm (native SaveWEBM, no extra deps) — skip this if webm is fine.
+    $vhs = Join-Path $comfyDir 'custom_nodes\ComfyUI-VideoHelperSuite'
+    if (-not (Test-Path $vhs)) {
+        Step 'Installing ComfyUI-VideoHelperSuite (optional .mp4 output)'
+        git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git $vhs
+        if (Test-Path (Join-Path $vhs 'requirements.txt')) { & $venvPy -m pip install -r (Join-Path $vhs 'requirements.txt') }
+        Warn2 'mp4 output also needs ffmpeg on PATH. Default video_format is webm (native) - no ffmpeg needed.'
+    }
+}
 
 # --- Optional 3D -------------------------------------------------------------
 if ($Include3D) {
