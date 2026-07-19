@@ -46,11 +46,16 @@ function Set-EnvTag($tag) {
     Set-Content $envFile $lines -Encoding utf8
 }
 function Test-Healthy {
-    for ($i=0; $i -lt 24; $i++) {
-        try { $c = (docker exec atlas-atlas-api-1 sh -lc "curl -s -o /dev/null -w '%{http_code}' -m 5 http://localhost:8080/healthz" 2>$null); if ($c -eq '200') { return $true } } catch {}
-        Start-Sleep 5
-    }
-    return $false
+    # Use the compose SERVICE (project-aware) not a hardcoded container name - a household's project is its
+    # clone-dir name (atlas-dist-atlas-api-1), not the Fielden box's atlas-atlas-api-1.
+    Push-Location $root
+    try {
+        for ($i=0; $i -lt 24; $i++) {
+            try { $c = (& $Compose[0] $Compose[1..($Compose.Count-1)] exec -T atlas-api sh -lc "curl -s -o /dev/null -w '%{http_code}' -m 5 http://localhost:8080/healthz" 2>$null); if ("$c".Trim() -eq '200') { return $true } } catch {}
+            Start-Sleep 5
+        }
+        return $false
+    } finally { Pop-Location }
 }
 
 Step "Checking the version feed"
@@ -64,7 +69,9 @@ if (($current -eq $target) -and -not $Force) { Ok 'Already up to date. Nothing t
 Step 'Backing up the database (best-effort)'
 try {
     $ts = (Get-Date).ToUniversalTime().ToString('yyyyMMdd_HHmmss')
-    docker exec atlas-sqlserver-1 bash -lc "T=`$(ls /opt/mssql-tools*/bin/sqlcmd | head -1); `"`$T`" -S localhost -U sa -P `"`$MSSQL_SA_PASSWORD`" -C -b -Q `"BACKUP DATABASE [Atlas] TO DISK='/var/opt/mssql/backups/preupdate_$ts.bak' WITH INIT, COMPRESSION`"" 2>$null
+    Push-Location $root
+    try { & $Compose[0] $Compose[1..($Compose.Count-1)] exec -T sqlserver bash -lc "T=`$(ls /opt/mssql-tools*/bin/sqlcmd | head -1); `"`$T`" -S localhost -U sa -P `"`$MSSQL_SA_PASSWORD`" -C -b -Q `"BACKUP DATABASE [Atlas] TO DISK='/var/opt/mssql/backups/preupdate_$ts.bak' WITH INIT, COMPRESSION`"" 2>$null }
+    finally { Pop-Location }
     Ok "DB backed up (preupdate_$ts.bak in the sqlserver backups volume)"
 } catch { Warn "DB backup skipped: $($_.Exception.Message)" }
 
