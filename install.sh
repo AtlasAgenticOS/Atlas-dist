@@ -93,6 +93,7 @@ ensure_docker
 # --- 2. Generate secrets + write .env ---------------------------------------
 step "Generating secrets and writing .env"
 secret()      { openssl rand -base64 32 | tr -d '/+=\n'; }
+hex_secret()  { openssl rand -hex 32; }   # 64-char hex — the vault master secret MUST be this (base64 crash-loops the api)
 sql_password() { echo "$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"; }   # SQL Server complexity rules
 
 cp "$ROOT/.env.example" "$ROOT/.env"
@@ -106,7 +107,7 @@ set_env() {
 set_env MSSQL_SA_PASSWORD               "$(sql_password)"
 set_env JWT_SECRET                      "$(secret)"
 set_env API_KEY                         "$(secret)"
-set_env VAULT_MASTER_SECRET             "$(secret)"
+set_env VAULT_MASTER_SECRET             "$(hex_secret)"
 set_env GMESSAGES_INGEST_SECRET         "$(secret)"
 set_env ATLAS_MUSIC_STREAM_TOKEN_SECRET "$(secret)"
 set_env TURN_SECRET                     "$(secret)"

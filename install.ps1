@@ -63,6 +63,12 @@ function New-SqlPassword {
     # Base64 minus chars SQL dislikes in a connection string, plus a guaranteed suffix.
     ((New-Secret 24) -replace '[+/=]', '') + 'Aa1!'
 }
+# The vault master secret MUST be a 64-char HEX string (32 bytes) - the api validates it and crash-loops
+# on anything else (a base64 secret here bricks a fresh install). openssl rand -hex 32 equivalent.
+function New-HexSecret {
+    param([int]$Bytes = 32)
+    ([Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes($Bytes))).ToLowerInvariant()
+}
 
 Write-Host ''
 Write-Host 'Atlas self-host installer' -ForegroundColor White
@@ -130,7 +136,7 @@ $secrets = @{
     'MSSQL_SA_PASSWORD'               = (New-SqlPassword)
     'JWT_SECRET'                      = (New-Secret)
     'API_KEY'                         = (New-Secret)
-    'VAULT_MASTER_SECRET'             = (New-Secret)
+    'VAULT_MASTER_SECRET'             = (New-HexSecret)   # MUST be 64-char hex, not base64
     'GMESSAGES_INGEST_SECRET'         = (New-Secret)
     'ATLAS_MUSIC_STREAM_TOKEN_SECRET' = (New-Secret)
     'TURN_SECRET'                     = (New-Secret)
