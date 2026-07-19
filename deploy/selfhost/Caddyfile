@@ -1,0 +1,55 @@
+# Atlas self-host reverse proxy - ONE front door, in a container. Replaces the Windows
+# IIS + host-Caddy + ARR chain with a single Caddy that terminates TLS itself and routes to the
+# compose services by their internal names (container-to-container, no host ports needed).
+#
+# Set ATLAS_DOMAIN in .env:
+#   - a real hostname (e.g. atlas.example.com) -> Caddy gets a Let's Encrypt cert automatically.
+#   - "localhost" (default) -> plain HTTP on :80 for LAN / behind a Tailscale/Cloudflare sidecar.
+#
+# The app serves under the /Atlas base path (matches APP_BASE_URL), so routing keeps that prefix.
+
+{
+	# Turn off the admin API; email is only used when a real domain triggers ACME.
+	admin off
+	email {$ATLAS_ACME_EMAIL:admin@localhost}
+}
+
+{$ATLAS_DOMAIN:localhost} {
+	# Unbuffered streaming for SignalR / music / SSE (what ARR's minResponseBuffer=0 was for).
+	# API (REST + SignalR hubs + MCP + Playwright).
+	handle /Atlas/api/* {
+		reverse_proxy atlas-api:8080 {
+			flush_interval -1
+			lb_try_duration 5s
+		}
+	}
+
+	# Music engine subpaths (Discord bot API/oauth + games, the per-listener stream, and HLS).
+	@musicApi path /Atlas/Music/api/* /Atlas/Music/oauth/* /Atlas/Games/*
+	handle @musicApi {
+		reverse_proxy atlas-bot:5085 {
+			flush_interval -1
+		}
+	}
+	handle /Atlas/Music/stream/* {
+		reverse_proxy atlas-music:5090 {
+			flush_interval -1
+		}
+	}
+	handle /Atlas/Music/hls/* {
+		reverse_proxy atlas-bot-mediamtx:8888 {
+			flush_interval -1
+		}
+	}
+
+	# Everything else under /Atlas -> the Razor web app.
+	handle /Atlas/* {
+		reverse_proxy atlas-web:8080 {
+			flush_interval -1
+		}
+	}
+
+	# Bare root -> the app.
+	redir / /Atlas/ 302
+	redir /Atlas /Atlas/ 302
+}

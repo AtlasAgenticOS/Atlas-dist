@@ -1,0 +1,644 @@
+services:
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+    ports:
+      - "1434:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+      # Backups land here on the host so they survive a container nuke.
+      # DbBackupWorker writes nightly *.bak files; user owns the retention
+      # policy on the host side.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\backups:/var/opt/mssql/backups
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "${MSSQL_SA_PASSWORD}", "-C", "-Q", "SELECT 1"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+    restart: always
+
+  atlas-api:
+    image: ghcr.io/atlasagenticos/atlas-api:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Atlas.Api/Dockerfile
+    ports:
+      - "5050:8080"
+    # autoheal restarts this container after 3 consecutive failed /ping checks (~90s) — a genuinely
+    # wedged Kestrel, not the IIS/ARR 502/RST race (that's proxy-layer, OUTSIDE the container, so the
+    # in-container /ping stays green during those storms → no false restart). /ping is no-DB ~1ms.
+    labels:
+      - "autoheal=true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/Atlas/api/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    environment:
+      ConnectionStrings__Atlas: "Server=sqlserver;Database=Atlas;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
+      Jwt__Secret: "${JWT_SECRET}"
+      Jwt__Issuer: "Atlas"
+      Jwt__Audience: "Atlas"
+      Api__Key: "${API_KEY}"
+      # Update feed + plugin marketplace source. Default = the publisher's own host (spyder.run);
+      # a downstream household sets these in .env to the PUBLIC Atlas-dist channel (see .env.example).
+      Updates__FeedUrl: "${UPDATES_FEED_URL:-https://spyder.run/Atlas/downloads/core-version.json}"
+      Plugins__RegistryUrl: "${PLUGINS_REGISTRY_URL:-https://spyder.run/Atlas/downloads/plugin-registry.json}"
+      # Shared with atlas-music for /stream/headless/*.mp3?token=... validation.
+      # Defaults to JWT_SECRET when no dedicated stream-token secret is set.
+      AtlasMusic__StreamTokenSecret: "${ATLAS_MUSIC_STREAM_TOKEN_SECRET:-${JWT_SECRET:-}}"
+      Stripe__SecretKey: "${STRIPE_SECRET_KEY}"
+      Stripe__WebhookSecret: "${STRIPE_WEBHOOK_SECRET}"
+      Stripe__PriceId: "${STRIPE_PRICE_ID}"
+      Smtp__Host: "${SMTP_HOST}"
+      Smtp__Port: "${SMTP_PORT:-587}"
+      Smtp__Username: "${SMTP_USERNAME}"
+      Smtp__Password: "${SMTP_PASSWORD}"
+      Smtp__FromEmail: "${SMTP_FROM_EMAIL}"
+      Smtp__FromName: "${SMTP_FROM_NAME:-Atlas}"
+      App__BaseUrl: "${APP_BASE_URL}"
+      # Core version stamp (Track G self-update). publish.ps1 sets these at deploy; default "dev"/"unknown".
+      CORE_VERSION:  "${CORE_VERSION:-dev}"
+      CORE_SHA:      "${CORE_SHA:-unknown}"
+      CORE_BUILT_AT: "${CORE_BUILT_AT:-}"
+      # G-c external plugins: folder scanned for third-party drop-in plugins; safe mode skips them.
+      EXTERNAL_PLUGINS_DIR: "/app/plugins"
+      ATLAS_SAFE_MODE:      "${ATLAS_SAFE_MODE:-false}"
+      # R1: where startup MigrationFAILED alerts go (out-of-band email when a migration crash-loops the stack).
+      # Empty -> the critical log still fires, just no email.
+      Alerts__AdminEmail: "${ADMIN_EMAIL:-}"
+      # Atlas Meet TURN relay (coturn). Empty by default → /meet/ice-config
+      # returns STUN only and calls work peer-to-peer. Set TURN_HOST
+      # (e.g. turn:spyder.run:3478) + TURN_SECRET in .env and start the
+      # coturn profile to enable relay fallback for cellular/strict-NAT.
+      Turn__Host: "${TURN_HOST:-}"
+      Turn__Secret: "${TURN_SECRET:-}"
+      # "Login with Discord" for games — reuses the SAME Discord app as the bot
+      # (DISCORD_OAUTH_* in .env). Redirect URI to register in the Discord app:
+      # https://spyder.run/Atlas/api/auth/discord/callback
+      Discord__ClientId: "${DISCORD_OAUTH_CLIENT_ID:-}"
+      Discord__ClientSecret: "${DISCORD_OAUTH_CLIENT_SECRET:-}"
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Production}"
+      TZ: "${TZ:-America/New_York}"
+      Firebase__ServiceAccountPath: "/app/secrets/firebase-adminsdk.json"
+      Firebase__ProjectId: "${FIREBASE_PROJECT_ID}"
+      Vault__MasterSecret: "${VAULT_MASTER_SECRET}"
+      # Shared secret the atlas-gmessages sidecar sends on /internal/gmessages/* calls.
+      GMessages__IngestSecret: "${GMESSAGES_INGEST_SECRET}"
+      Atlas__SoulPath: "/app/soul.md"
+      Kokoro__Url: "http://atlas-kokoro:8765"
+      Xtts__Url: "http://atlas-xtts:8766"
+      Whisper__Url: "http://atlas-whisper:8771"
+      # Wake-word tokenizer sidecar — turns "HEY <name>" into the KWS BPE tokens
+      # (per-user "Hey <assistant name>" wake word). See Atlas.KwsTokenizer.
+      KwsTokenizer__Url: "http://atlas-kws-tokenizer:8772"
+      VoyageAI__ApiKey: "${VOYAGE_API_KEY}"
+      # Steam Web API key (one system key reads any public Steam profile).
+      STEAM_API_KEY: "${STEAM_API_KEY:-}"
+      # Anthropic key intentionally NOT set — every AI call uses the
+      # asking user's per-user key from UserSettings via AnthropicClientFactory.ForKey().
+      # See memory feedback_per_user_api_keys.md.
+      # Local LLM (Ollama) — used by LocalToolLoop and routine classifier /
+      # summarizer / dedup work. Bumped 2026-05-21 from llama3.1:8b-q8 to
+      # qwen2.5:14b-q4 after a smaller model hallucinated a name
+      # in a casual reply — stronger 14B instruction-tuning to
+      # Local chat model. Tried Qwen3-30B-A3B-Instruct-2507 (2026-07-01) for chat quality, but at 18 GB it
+      # does NOT fit the 16 GB card - it partial-CPU-offloads and is slow at everything (~10-15s chat, ~35s
+      # tool turns). Reverted to the 14b: it fits, is fast (~5s), and COEXISTS with the 7b tool model
+      # (15 GB total, no ollama swap). This local tier is only for keyless kids + outage fallback (Mike
+      # chats on cloud Haiku). Tools run on the 7b (ToolModel below) w/ the lean local prompt. Full battery
+      # test 2026-07-01: 7b best tool-router (25/25), 30B too big for this card -> removed.
+      LocalLlm__ChatModel: "qwen2.5:14b-atlas"
+      LocalLlm__ToolModel: "qwen2.5:7b-instruct-q4_K_M"   # 7b tool loop: fits 16GB fully (fast), best tool-routing reliability (25/25 battery), coexists w/ the 14b chat model (no swap). Lean local prompt keeps the payload small.
+      LocalLlm__NumCtx: "8192"                  # lean local prompt + tools fit easily; small KV cache stays on-GPU (fast). Bumped from 4096 for tool-result-turn headroom.
+      # 2026-07-01: collapsed the assistant to ONE local model (30B for chat AND tools). Root cause of the
+      # earlier 30B tool failure was the ~20k-token FULL prompt overflowing local ctx, NOT the 30B - fixed
+      # by the lean local prompt above. Battery test: with a lean prompt all models tool-route well; the
+      # 30B (chat quality) + lean prompt is fast + accurate, so the 14b is no longer needed on the API tool
+      # loop. (Worker still defaults to the 14b for its own agents, which don't use the lean prompt yet.)
+      # Lighter 7B for routine classify/summarize/triage/dedup (Classify/CompleteAsync). ~4.5 GB VRAM.
+      LocalLlm__ClassifierModel: "qwen2.5:7b-instruct-q4_K_M"
+      # This PC also games on the same 16 GB GPU. Keep model residency SHORT-ish so a
+      # single assistant turn doesn't camp ~9.5 GB of VRAM for long and starve the game,
+      # but NOT so short the 14b unloads BETWEEN turns of one conversation (1m did that —
+      # every sporadic assistant turn then cold-loaded ~10s, the "took so long" complaint
+      # 2026-06-17). 5m keeps a conversation warm and still frees the GPU within 5 min of
+      # the last turn (vs the 8m/30m code defaults that caused "game slow after a reminder").
+      LocalLlm__KeepAliveChat: "5m"
+      LocalLlm__KeepAlive: "2m"
+      # CLI-bridge dispatch working directory (HOST path). Without this the
+      # per-turn dispatch cwd (AgentRunner ~line 498) falls back to empty and
+      # the host agent runs in the wrong place — the /root vs C:\Users path
+      # mismatch that blocked #19197/#19195. Per-user "cli:working_directory"
+      # still overrides this. Single-quoted: YAML treats backslashes in a
+      # double-quoted scalar as escapes (\U, \s) and would corrupt the path.
+      CliBridge__WorkingDirectory: '${CLI_BRIDGE_WORKDIR:-C:\Users\themi\source\repos}'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - dataprotection-keys:/root/.aspnet/DataProtection-Keys
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\cli-queue:/app/cli-queue
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\secrets:/app/secrets:ro
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\soul.md:/app/soul.md
+      # G-c: third-party plugin drop-in folder (see ExternalPluginLoader). One subfolder per plugin.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\plugins:/app/plugins
+      # Persistent store for PhoneLink photo uploads. Without this mount the
+      # JPEGs under /app/uploads/photos/ evaporate on every container rebuild
+      # while the PhoneLinkPhotos DB rows survive — the UI then shows
+      # thumbnails (base64 in the DB) but serves 404s for the full-res file.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\uploads:/app/uploads
+      # BL-008: persisted receipt images. ReceiptOcrService writes to
+      # /app/receipts/{userId}/{guid}.{ext}; DB stores the relative path.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\receipts:/app/receipts
+      # BL-006: encrypted document vault. AesDocumentVault writes to
+      # /app/vault/{userId}/{guid}.enc (AES-256-GCM encrypted bytes).
+      # DB row stores the relative path + metadata only.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\vault:/app/vault
+      # Homeschool curriculum PDFs. CurriculumDocService writes to
+      # /app/curriculum/{userId}/{guid}.pdf; DB stores relative path
+      # + flattened text the lesson generator references in its prompt.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\curriculum:/app/curriculum
+      # BL-033: the shared spool the always-up atlas-levelsense receiver writes Sentry
+      # posts into; LevelSenseSpoolDrainWorker (in this container) drains + ingests them.
+      # Decouples the Sentry from atlas-api restarts - an API deploy can no longer 502 it
+      # offline (the recurring freezer-sensor outage).
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\levelsense-spool:/app/spool
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      # NOTE: the local-AI/voice services (kokoro TTS, whisper STT, kws-tokenizer) are OPTIONAL - the
+      # API connects to them lazily over HTTP and falls back to cloud when they're absent (Haiku-first).
+      # They are deliberately NOT startup dependencies so the API boots without a GPU, and so the
+      # self-host overlay can put them behind `--profile gpu`.
+    restart: unless-stopped
+
+  # BL-033: dead-simple, dependency-free, ALWAYS-UP receiver for the Level Sense Sentry.
+  # It only spools each /_device/data post to the shared volume and returns 200 instantly.
+  # Because its image is trivial + stable, `docker compose up -d atlas-api` leaves it running,
+  # so an Atlas.Api deploy can never 502 the Sentry into a real-cloud failover again. Point the
+  # IIS "LevelSenseCapture" site at http://localhost:5062/_device/data (see level-sense runbook).
+  atlas-levelsense:
+    image: ghcr.io/atlasagenticos/atlas-levelsense:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: Atlas.LevelSenseIngest
+      dockerfile: Dockerfile
+    ports:
+      - "5062:8080"
+    environment:
+      LEVELSENSE_SPOOL: /app/spool
+    volumes:
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\levelsense-spool:/app/spool
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  atlas-kokoro:
+    image: ghcr.io/atlasagenticos/atlas-kokoro:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: Atlas.Kokoro
+      dockerfile: Dockerfile
+    ports:
+      - "8765:8765"
+    environment:
+      HF_TOKEN: "${HF_TOKEN}"
+    volumes:
+      - kokoro-hf-cache:/root/.cache/huggingface
+    restart: unless-stopped
+    deploy:            # GPU: TTS ~730ms/sentence on CPU -> a fraction on GPU (torch is the +cu130 build).
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # XTTS-v2 voice-clone TTS — used ONLY for cloned voices (e.g. a natural young-boy voice Kokoro can't
+  # do). Kokoro stays the default for every other voice. Reference clips live in ${ATLAS_DATA_ROOT:-C:\Atlas}\voices
+  # (<voice>.wav). Shares the GPU with Ollama; the ~1.8 GB model loads lazily on first /speak.
+  atlas-xtts:
+    image: ghcr.io/atlasagenticos/atlas-xtts:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: Atlas.Xtts
+      dockerfile: Dockerfile
+    ports:
+      - "8766:8766"
+    environment:
+      HF_TOKEN: "${HF_TOKEN}"
+      COQUI_TOS_AGREED: "1"
+    volumes:
+      - xtts-hf-cache:/root/.cache/huggingface
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\voices:/app/voices:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  atlas-whisper:
+    image: ghcr.io/atlasagenticos/atlas-whisper:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: Atlas.Whisper
+      dockerfile: Dockerfile.cuda   # GPU build: ~137ms/clip vs ~4.1s on CPU (2026-07-01). CPU Dockerfile is the fallback.
+    ports:
+      - "127.0.0.1:8771:8771"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Wake-word tokenizer — tiny python+sentencepiece service that converts a wake
+  # phrase ("HEY SAM") into the gigaspeech KWS BPE tokens. The .NET tokenizer can't
+  # load this Unigram model, so the API calls this on a name change (cached).
+  atlas-kws-tokenizer:
+    image: ghcr.io/atlasagenticos/atlas-kws-tokenizer:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: Atlas.KwsTokenizer
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8772:8772"
+    restart: unless-stopped
+
+  # ── Local LLM (BL-011) ───────────────────────────────────────────────────
+  # Self-hosted inference so routine classifier / summarizer / dedup-key
+  # workloads don''t need Anthropic credits to run. Ollama exposes an HTTP
+  # API on :11434 compatible with our OllamaLocalLlmClient. Model files
+  # live in a persistent volume so they survive container rebuilds; first
+  # pull of llama3.1:8b-instruct-q8_0 is ~9 GB and runs into VRAM on the
+  # RTX 5070 Ti at ~80-120 tok/s.
+  #
+  # GPU access requires nvidia-container-runtime; Docker Desktop on
+  # Windows wires this through WSL2 automatically when the host has the
+  # NVIDIA Container Toolkit installed. The `deploy.resources.reservations`
+  # block is the compose v2 equivalent of `--gpus all`.
+  atlas-ollama:
+    image: ollama/ollama:latest
+    container_name: atlas-ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    # Informational only (no autoheal label). `ollama list` uses the bundled CLI (no curl
+    # needed) and only succeeds when the server is responsive — catches a hung/crashed
+    # runtime. Generous start_period: a cold model load can take ~30s.
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    environment:
+      # Idle-unload timer. Atlas's own chat/complete calls override this with a
+      # per-request keep_alive (LocalLlm:KeepAlive, default 30m) so the ACTIVE model
+      # stays warm across a batch of jobs; this 2m default only governs incidental
+      # callers (embed/vision) that should free VRAM quickly.
+      OLLAMA_KEEP_ALIVE: "2m"
+      # ONE large model resident at a time. The 14b chat model (~10 GB) and the 7b
+      # classifier (~5 GB) cannot both fit a 16 GB card with KV cache — trying to
+      # (MAX=2) made Ollama either crash the runner on KV expansion ("exit -1") or
+      # partial-offload to CPU (observed 43%/57% CPU/GPU), which ran so slow that
+      # background scans timed out and fell to the paid Anthropic fallback. With 1,
+      # whichever model is active gets the WHOLE card and runs 100% on GPU; switching
+      # between chat (14b) and scans (7b) costs a ~5-25s reload that the per-request
+      # keep_alive + the client's retry-once already absorb. Reliability > a warm
+      # second model. (Reliability is the priority — Atlas is daily-life critical.)
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      # One request slot. Single-user instance — concurrency is rare and a 2nd slot
+      # just doubles the active model's KV-cache VRAM, which is exactly the headroom
+      # that was being lost. 1 keeps the active model comfortably on-GPU.
+      OLLAMA_NUM_PARALLEL: "1"
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  atlas-web:
+    image: ghcr.io/atlasagenticos/atlas-web:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Atlas.Web/Dockerfile
+    ports:
+      - "5051:8080"
+    # autoheal restarts after 3 failed checks (~90s). "/Atlas/" 302s to login when up — a 3xx is
+    # success for `curl -f`, exactly the liveness signal we want.
+    labels:
+      - "autoheal=true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/Atlas/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    environment:
+      Api__BaseUrl: "http://atlas-api:8080/Atlas/api"
+      Api__Key: "${API_KEY}"
+      ConnectionStrings__Atlas: "Server=sqlserver;Database=Atlas;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
+      # Shared with atlas-api so the /auth/desktop-sso endpoint can validate
+      # the JWT minted by the API and trade it for a cookie-auth session.
+      Jwt__Secret: "${JWT_SECRET}"
+      Jwt__Issuer: "Atlas"
+      Jwt__Audience: "Atlas"
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Production}"
+    volumes:
+      - dataprotection-keys-web:/root/.aspnet/DataProtection-Keys
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\downloads:/app/wwwroot/downloads
+    depends_on:
+      - atlas-api
+    restart: unless-stopped
+
+  # ── Google Messages web-companion sidecar (SPIKE) ──────────────────────────
+  # Pairs once via QR (scan it from `docker logs atlas-gmessages`), then streams
+  # normalized message events — both incoming AND outgoing — for the future
+  # GMessagesCompanionWorker to ingest into PhoneLinkMessages. Talks outbound to
+  # Google + reachable only on the internal Docker network (plus 127.0.0.1:8092
+  # for spike inspection of /qr and /events). See atlas-gmessages/README.md.
+  atlas-gmessages:
+    image: ghcr.io/atlasagenticos/atlas-gmessages:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: ./atlas-gmessages
+      dockerfile: Dockerfile
+    container_name: atlas-gmessages
+    environment:
+      # Multi-user: sessions/cookies live encrypted in the DB via the API, not on
+      # disk. The sidecar syncs per-user sessions over the internal Docker network.
+      ATLAS_GM_API_BASE: "http://atlas-api:8080/Atlas/api"
+      ATLAS_GM_INGEST_SECRET: "${GMESSAGES_INGEST_SECRET}"
+      ATLAS_GM_HTTP_ADDR: ":8092"
+      TZ: "${TZ:-America/New_York}"
+    depends_on:
+      - atlas-api
+    restart: unless-stopped
+
+  atlas-worker:
+    image: ghcr.io/atlasagenticos/atlas-worker:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Atlas.Worker/Dockerfile
+    environment:
+      ConnectionStrings__Atlas: "Server=sqlserver;Database=Atlas;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
+      Atlas__ApiBaseUrl: "http://atlas-api:8080/Atlas/api"
+      Api__Key: "${API_KEY}"
+      Firebase__ServiceAccountPath: "/app/secrets/firebase-adminsdk.json"
+      DOTNET_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Production}"
+      TZ: "${TZ:-America/New_York}"
+      # Anthropic key intentionally NOT set — every AI call uses the
+      # asking user's per-user key from UserSettings via AnthropicClientFactory.ForKey().
+      # See memory feedback_per_user_api_keys.md.
+      # Required by AesCredentialVault — without it any worker that touches
+      # encrypted user credentials (Package/Reservation email parsers read
+      # IMAP creds out of the DB) fails on startup. Was already wired on the
+      # API block but missing here; manifested as 88+ consecutive failures
+      # on PackageEmailParserWorker and ReservationEmailParserWorker.
+      Vault__MasterSecret: "${VAULT_MASTER_SECRET}"
+      # Match the API: worker email-summary / classifier paths also go through OllamaLocalLlmClient.
+      # 14b (not the retired 30B). Worker tool loops keep the code-default 14b ToolModel (they use the
+      # full agent prompt, not the assistant's lean prompt, so the 14b's graceful truncation is safer
+      # than the 7b here). Worker is cloud/CLI-first anyway, so local is a rare fallback.
+      LocalLlm__ChatModel: "qwen2.5:14b-atlas"
+      # Must match the API setting — worker classifier/summarizer paths go
+      # through OllamaLocalLlmClient too. Per feedback_atlas_worker_env_drift.
+      LocalLlm__ClassifierModel: "qwen2.5:7b-instruct-q4_K_M"
+      # Match the API: short-ish model residency so worker LLM jobs (summaries,
+      # agents) don't camp VRAM on the shared 16 GB GPU while gaming, but the 14b
+      # stays warm across a burst of jobs (5m, matching KeepAliveChat on the API —
+      # both hit the same Ollama container, so they must agree or they fight).
+      LocalLlm__KeepAliveChat: "5m"
+      LocalLlm__KeepAlive: "2m"
+      # G-c external plugins (polled plugins get their host in the worker process).
+      EXTERNAL_PLUGINS_DIR: "/app/plugins"
+      ATLAS_SAFE_MODE:      "${ATLAS_SAFE_MODE:-false}"
+    volumes:
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\secrets:/app/secrets:ro
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\plugins:/app/plugins
+    depends_on:
+      - atlas-api
+    restart: unless-stopped
+
+  # ── AtlasBot (Discord music + games, integrated from former AtlasBot repo)
+  # Three services together:
+  #   atlas-bot           — the .NET bot itself (slash commands, web UI at port 5085)
+  #   atlas-bot-lavalink  — JVM, owns Discord voice transport; the bot tells it
+  #                         to relay the headless mirror stream into voice
+  #   atlas-bot-mediamtx  — optional HLS bridge for ARM/iOS listeners that
+  #                         don't grok the raw MP3 stream
+  # External access for end users goes through stream.spyder.run which
+  # the IIS reverse proxy points at port 5085.
+  atlas-bot-lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    container_name: atlas-bot-lavalink
+    restart: unless-stopped
+    environment:
+      - _JAVA_OPTIONS=-Xmx512m
+      - SERVER_PORT=2333
+      - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD:-youshallnotpass}
+      - LAVASRC_SPOTIFY_ENABLED=${LAVASRC_SPOTIFY_ENABLED:-false}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
+    volumes:
+      - ./Atlas.Bot.Docker/lavalink/application.yml:/opt/Lavalink/application.yml:ro
+      - ./Atlas.Bot.Docker/lavalink/plugins:/opt/Lavalink/plugins
+      - ./Atlas.Bot.Docker/soundboard:/soundboard:ro
+    # autoheal label tells the willfarrell/autoheal sidecar to restart this
+    # container when the healthcheck reports unhealthy. The Lavalink JVM
+    # occasionally locks up its embedded HTTP stack (existing WS keeps
+    # working — music plays — but /version stops responding); a restart
+    # clears it. Previously the user had to manually `docker restart`
+    # when they noticed audio glitches.
+    labels:
+      autoheal: "true"
+    healthcheck:
+      # 15s timeout (was 5s) — JVM GC pauses + plugin manager startup can
+      # easily exceed 5s under memory pressure on the 512m heap.
+      test: ["CMD-SHELL", "wget -qO- --header='Authorization: ${LAVALINK_PASSWORD:-youshallnotpass}' http://localhost:2333/version || exit 1"]
+      interval: 15s
+      timeout: 15s
+      retries: 8
+      start_period: 30s
+
+  atlas-bot-mediamtx:
+    image: bluenviron/mediamtx:latest-ffmpeg
+    container_name: atlas-bot-mediamtx
+    restart: unless-stopped
+    environment:
+      - MTX_LOGLEVEL=info
+    volumes:
+      - ./Atlas.Bot.Docker/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "${ATLAS_BOT_HLS_PORT:-8888}:8888"
+
+  atlas-bot:
+    image: ghcr.io/atlasagenticos/atlas-bot:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Atlas.Bot.Docker/Dockerfile
+    container_name: atlas-bot
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    depends_on:
+      atlas-bot-lavalink:
+        # service_started (not service_healthy): Lavalink's plugin manager hits
+        # an external Maven/SSL endpoint on every boot, and when that endpoint
+        # flakes the container sits unhealthy indefinitely — blocking atlas-bot
+        # from starting even though the user-facing /play runs on the headless
+        # pipeline and has no Lavalink dependency. Only /play-legacy + the
+        # soundboard touch Lavalink at runtime, which is the right failure
+        # mode vs. the whole bot being offline. Observed 2026-05-15.
+        condition: service_started
+    environment:
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Production}"
+      # Config section name is still "AtlasBot" inside appsettings.json —
+      # keeping it stable avoids forcing an env-var rename. Public brand is AtlasBot.
+      AtlasBot__Discord__Token:              "${DISCORD_TOKEN}"
+      AtlasBot__Discord__DevGuildId:         "${DISCORD_DEV_GUILD_ID:-}"
+      AtlasBot__Discord__GuildIds:           "${DISCORD_GUILD_IDS:-}"
+      AtlasBot__Lavalink__BaseAddress:       "http://atlas-bot-lavalink:2333/"
+      AtlasBot__Lavalink__Passphrase:        "${LAVALINK_PASSWORD:-youshallnotpass}"
+      AtlasBot__Api__ApiKey:                 "${AtlasBot_API_KEY}"
+      AtlasBot__Web__BasePath:               "${AtlasBot_BASE_PATH:-}"
+      AtlasBot__Web__PublicUrl:              "${ATLASBOT_PUBLIC_URL:-}"
+      AtlasBot__Web__OAuth__ClientId:        "${DISCORD_OAUTH_CLIENT_ID:-}"
+      AtlasBot__Web__OAuth__ClientSecret:    "${DISCORD_OAUTH_CLIENT_SECRET:-}"
+      # Atlas.Api integration — enables /oauth/atlas-sso (paired-device login)
+      # and writes the Discord-id link back to UserSettings during /oauth/callback.
+      AtlasBot__Web__Atlas__ApiBaseUrl:       "${APP_BASE_URL:-https://spyder.run/Atlas}/api"
+      AtlasBot__Web__Atlas__JwtSecret:        "${JWT_SECRET:-}"
+      # Shared with atlas-music for /stream/headless/*.mp3?token=... validation.
+      # Bot signs its own per-session tokens against this secret so listeners
+      # via stream.spyder.run get attributed without round-tripping atlas-api.
+      AtlasMusic__StreamTokenSecret:          "${ATLAS_MUSIC_STREAM_TOKEN_SECRET:-${JWT_SECRET:-}}"
+      AtlasBot__Web__Atlas__JwtIssuer:        "${JWT_ISSUER:-Atlas}"
+      AtlasBot__Web__Atlas__JwtAudience:      "${JWT_AUDIENCE:-Atlas}"
+      # Shared X-Api-Key for server-to-server calls into Atlas.Api (Discord
+      # ban-list check during /oauth/callback).
+      AtlasBot__Web__Atlas__ApiKey:           "${API_KEY:-}"
+      AtlasBot__YouTube__ClientId:           "${YOUTUBE_CLIENT_ID:-}"
+      AtlasBot__YouTube__ClientSecret:       "${YOUTUBE_CLIENT_SECRET:-}"
+      AtlasBot__House__Enabled:              "${AtlasBot_HOUSE_ENABLED:-false}"
+      AtlasBot__House__GuildId:              "${AtlasBot_HOUSE_GUILD_ID:-0}"
+      AtlasBot__House__VoiceChannelId:       "${AtlasBot_HOUSE_VOICE_CHANNEL_ID:-0}"
+    ports:
+      - "${ATLAS_BOT_API_PORT:-5085}:5085"
+    volumes:
+      # Persistent state — SQLite DB, saved queues, custom CAH packs, etc.
+      # The cutover migration copies the existing AtlasBot.db here.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\bot-data:/data
+      - ./Atlas.Bot.Docker/soundboard:/soundboard:ro
+
+  # ── Atlas.Music — extracted from atlas-bot 2026-05-18 (BL-010) so the
+  # personal-music HTTP engine has its own ops lifecycle separate from the
+  # Discord gateway. Shares the /data volume with atlas-bot (same SQLite DB:
+  # HeadlessSavedRooms + HeadlessSavedTracks) so a persisted queue survives
+  # a restart of either container. Phase 4 will repoint atlas-api's
+  # PersonalProxy at atlas-music:5090; until then atlas-bot still serves
+  # the same endpoints on 5085 and atlas-music can run in parallel for
+  # smoke-testing.
+  atlas-music:
+    image: ghcr.io/atlasagenticos/atlas-music:${ATLAS_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Atlas.Music/Dockerfile
+    container_name: atlas-music
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Production}"
+      AtlasBot__Api__ApiKey:                 "${AtlasBot_API_KEY}"
+      AtlasBot__House__Enabled:              "${AtlasBot_HOUSE_ENABLED:-false}"
+      AtlasBot__House__GuildId:              "${AtlasBot_HOUSE_GUILD_ID:-0}"
+      AtlasBot__House__VoiceChannelId:       "${AtlasBot_HOUSE_VOICE_CHANNEL_ID:-0}"
+      ANTHROPIC_API_KEY:                     "${ANTHROPIC_API_KEY:-}"
+      MSSQL_SA_PASSWORD:                     "${MSSQL_SA_PASSWORD}"
+      API_KEY:                               "${API_KEY}"
+      # Stream-token secret. Atlas.Api signs short-lived JWTs with this
+      # secret; atlas-music validates them on /stream/headless/*.mp3?token=...
+      # so anonymous HTTP listeners can be resolved back to an Atlas identity
+      # for the listener panel on the bot UI. Same value used by both
+      # services. Reuses JWT_SECRET when no dedicated value is set.
+      AtlasMusic__StreamTokenSecret:         "${ATLAS_MUSIC_STREAM_TOKEN_SECRET:-${JWT_SECRET:-}}"
+    volumes:
+      # Same SQLite DB + cache dirs as atlas-bot so the two processes
+      # coordinate on the persisted queue state.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\bot-data:/data
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\secrets:/app/secrets:ro
+    # Publish 5090 on the host so an external tunnel (running outside
+    # Docker, hitting the host LAN IP on :5090) can reach atlas-music for
+    # the public headless stream (/stream/headless/*.mp3) route.
+    # Internal callers (atlas-api, atlas-bot's RoomBridgeService) reach it
+    # via the docker network on the same port.
+    ports:
+      - "5090:5090"
+
+  # Atlas Meet TURN relay. OPT-IN via the "turn" profile so a normal
+  # `docker compose up` never starts it:
+  #     docker compose --profile turn up -d coturn
+  # Requires (see infra/coturn/README): TURN_SECRET + TURN_REALM + TURN_EXTERNAL_IP
+  # in .env, and router port-forwarding of 3478 (UDP+TCP) and the 49160-49200
+  # UDP relay range to this host. Until then, calls use STUN/P2P (no regression).
+  coturn:
+    image: coturn/coturn:latest
+    container_name: atlas-coturn
+    restart: unless-stopped
+    profiles: ["turn"]
+    # Explicit port maps (Docker Desktop for Windows has no real host networking).
+    # The relay range MUST match min-port/max-port in turnserver.conf and the
+    # router port-forward.
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49200:49160-49200/udp"
+    volumes:
+      - ./infra/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: >
+      -c /etc/coturn/turnserver.conf
+      --static-auth-secret=${TURN_SECRET:-changeme}
+      --realm=${TURN_REALM:-spyder.run}
+      --external-ip=${TURN_EXTERNAL_IP:-}
+
+  # Autoheal sidecar — watches every container labelled autoheal=true and
+  # `docker restart`s it on unhealthy status. Tiny (alpine + sh script, ~7 MB
+  # RAM), monitors via mounted docker socket. Added 2026-05-31 after
+  # atlas-bot-lavalink locked up its HTTP stack for 21h while music kept
+  # playing — without autoheal these never recover without a manual restart.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: atlas-autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=30
+      - AUTOHEAL_START_PERIOD=60
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  sqlserver-data:
+  dataprotection-keys:
+  dataprotection-keys-web:
+  xtts-hf-cache:
+  kokoro-hf-cache:
+  # Ollama model files — pulling llama3.1:8b-instruct-q8_0 takes ~9 GB.
+  # Named volume survives container rebuilds so we don't re-pull on every deploy.
+  ollama-models:

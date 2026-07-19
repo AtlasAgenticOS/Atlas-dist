@@ -1,0 +1,114 @@
+# Atlas self-host overlay - the "packaged, installable anywhere Docker runs" front.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.selfhost.yml up -d           # cloud-LLM, no GPU
+#   docker compose -f docker-compose.yml -f docker-compose.selfhost.yml --profile gpu up -d   # + local GPU AI
+#
+# What it does vs the Windows box:
+#   - Adds ONE containerized Caddy that terminates 80/443 itself and routes to the compose services
+#     internally - replacing the IIS + host-Caddy + ARR chain entirely. No IIS, no Windows scheduled task.
+#   - Makes the GPU services (ollama/kokoro/xtts/whisper) OPT-IN via `--profile gpu`, so the default
+#     install needs no GPU/WSL2 (cloud-LLM / Haiku-first). The code already tolerates their absence.
+#   - Host data root is ${ATLAS_DATA_ROOT} (set a POSIX path like /opt/atlas in .env on Linux).
+#
+# Remote access is a separate owner choice (Tailscale sidecar or a Cloudflare Tunnel) - not baked in.
+services:
+  caddy:
+    image: caddy:2
+    container_name: atlas-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"          # HTTP/3
+    environment:
+      ATLAS_DOMAIN: "${ATLAS_DOMAIN:-localhost}"
+      ATLAS_ACME_EMAIL: "${ATLAS_ACME_EMAIL:-admin@localhost}"
+    volumes:
+      - ./deploy/selfhost/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # ACME certs persist here
+      - caddy-config:/config
+    depends_on:
+      - atlas-api
+      - atlas-web
+
+  # ── Remote access (pick ONE, both optional) ────────────────────────────────
+  # Cloudflare Tunnel: a PUBLIC hostname anyone can reach, no client software. Create a tunnel in the
+  # Cloudflare dashboard, point its public hostname at http://caddy:80, copy the token into .env
+  # (CLOUDFLARE_TUNNEL_TOKEN), then:  ... --profile cloudflare up -d.  Keep ATLAS_DOMAIN=localhost
+  # (Caddy serves HTTP internally; Cloudflare terminates TLS at the edge).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: atlas-cloudflared
+    profiles: ["cloudflare"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      # Set CLOUDFLARE_TUNNEL_TOKEN in .env (Cloudflare Zero Trust -> Tunnels). Empty default keeps the
+      # DEFAULT install parseable; cloudflared errors clearly if you start this profile without it.
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+    depends_on:
+      - caddy
+
+  # Tailscale: PRIVATE mesh - Atlas is reachable only by devices on YOUR tailnet (you + invited people),
+  # nothing public. Easiest + most private for a household-only box. Get an auth key at
+  # login.tailscale.com/admin/settings/keys, set TS_AUTHKEY in .env, then: ... --profile tailscale up -d.
+  # `tailscale serve` exposes Caddy on the MagicDNS name over HTTPS.
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: atlas-tailscale
+    profiles: ["tailscale"]
+    hostname: "${ATLAS_TS_HOSTNAME:-atlas}"
+    restart: unless-stopped
+    environment:
+      # Set TS_AUTHKEY in .env (login.tailscale.com/admin/settings/keys). Empty default keeps the
+      # DEFAULT install parseable; tailscaled errors clearly if you start this profile without it.
+      TS_AUTHKEY: "${TS_AUTHKEY:-}"
+      TS_STATE_DIR: "/var/lib/tailscale"
+      TS_SERVE_CONFIG: "/config/serve.json"    # proxies tailnet HTTPS -> the caddy container
+      TS_EXTRA_ARGS: "--accept-dns=false"
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./deploy/selfhost/tailscale-serve.json:/config/serve.json:ro
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - caddy
+
+  # ── GPU AI becomes opt-in (default install runs without a GPU) ──────────────
+  atlas-ollama:
+    profiles: ["gpu"]
+  atlas-kokoro:
+    profiles: ["gpu"]
+  atlas-xtts:
+    profiles: ["gpu"]
+  atlas-whisper:
+    profiles: ["gpu"]
+  atlas-kws-tokenizer:            # wake-word tokenizer - only useful alongside whisper/voice
+    profiles: ["gpu"]
+
+  # ── Published core services: PULL the public GHCR images; never build from (absent) source ──
+  # The base compose keeps build: sections for the dev box. Compose defaults a service WITH a build
+  # section to pull_policy: build, so a household (no source) would try to BUILD and fail. Force
+  # pull-if-missing here so `up` fetches the published image instead. (Dev builds explicitly via -Build.)
+  atlas-api:
+    pull_policy: missing
+  atlas-web:
+    pull_policy: missing
+  atlas-worker:
+    pull_policy: missing
+  atlas-bot:
+    pull_policy: missing
+  atlas-music:
+    pull_policy: missing
+  atlas-gmessages:
+    pull_policy: missing
+
+  # LevelSense sensor capture is instance-specific and NOT published to public GHCR - keep it out of the
+  # default self-host install; a household that wants it opts in with --profile levelsense.
+  atlas-levelsense:
+    profiles: ["levelsense"]
+
+volumes:
+  caddy-data:
+  caddy-config:
+  tailscale-state:
