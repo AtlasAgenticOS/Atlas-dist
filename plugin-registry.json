@@ -1,0 +1,15 @@
+{
+  "updatedAt": "2026-07-19",
+  "plugins": [
+    {
+      "id": "hello_world",
+      "name": "Hello World (sample)",
+      "version": "1.0.0",
+      "author": "Atlas plugin SDK",
+      "description": "A minimal reference plugin that proves the drop-in loader + one-click installer. Copy it to build your own.",
+      "category": "Developer",
+      "capabilities": [],
+      "packageUrl": "https://raw.githubusercontent.com/AtlasAgenticOS/Atlas-dist/main/plugins/hello-world.atlasplugin.zip"
+    }
+  ]
+}
