@@ -89,6 +89,10 @@ services:
       Vault__MasterSecret: "${VAULT_MASTER_SECRET}"
       # Shared secret the atlas-gmessages sidecar sends on /internal/gmessages/* calls.
       GMessages__IngestSecret: "${GMESSAGES_INGEST_SECRET}"
+      # Local LLM (Ollama) - OPTIONAL, off by default (atlas-ollama is profile-gated). BaseUrl can point at
+      # ANY Ollama instance (the bundled container or an external one anywhere); setup-local-llm.ps1 sets it.
+      # Model names are set further down and are also env-overridable (LOCALLLM_CHAT_MODEL etc.).
+      LocalLlm__BaseUrl:         "${LOCALLLM_BASE_URL:-http://atlas-ollama:11434}"
       Atlas__SoulPath: "/app/soul.md"
       Kokoro__Url: "http://atlas-kokoro:8765"
       Xtts__Url: "http://atlas-xtts:8766"
@@ -288,6 +292,12 @@ services:
   atlas-ollama:
     image: ollama/ollama:latest
     container_name: atlas-ollama
+    # OPT-IN: local LLM (Ollama) is off by default - Atlas is cloud-first (Haiku + Claude CLI), and a
+    # resident Ollama model squats on GPU VRAM (measured ~8GB), starving on-box video/image generation.
+    # Enable it only if you want a $0 local fallback: `docker compose --profile local-llm up -d atlas-ollama`
+    # (or run scripts/setup-local-llm.ps1, which GPU-auto-tunes the model). To use an EXISTING Ollama
+    # elsewhere instead, leave this off and set LocalLlm:BaseUrl to that instance's URL.
+    profiles: ["local-llm"]
     ports:
       - "127.0.0.1:11434:11434"
     # Informational only (no autoheal label). `ollama list` uses the bundled CLI (no curl
@@ -412,10 +422,12 @@ services:
       # 14b (not the retired 30B). Worker tool loops keep the code-default 14b ToolModel (they use the
       # full agent prompt, not the assistant's lean prompt, so the 14b's graceful truncation is safer
       # than the 7b here). Worker is cloud/CLI-first anyway, so local is a rare fallback.
-      LocalLlm__ChatModel: "qwen2.5:14b-atlas"
-      # Must match the API setting — worker classifier/summarizer paths go
-      # through OllamaLocalLlmClient too. Per feedback_atlas_worker_env_drift.
-      LocalLlm__ClassifierModel: "qwen2.5:7b-instruct-q4_K_M"
+      # OPTIONAL local LLM - env-overridable so setup-local-llm.ps1 / a BYO Ollama URL take effect here too
+      # (worker classifier/summarizer paths also go through OllamaLocalLlmClient; per feedback_atlas_worker_env_drift
+      # the worker MUST match the API). Off by default (atlas-ollama profile-gated); defaults match the code.
+      LocalLlm__BaseUrl: "${LOCALLLM_BASE_URL:-http://atlas-ollama:11434}"
+      LocalLlm__ChatModel: "${LOCALLLM_CHAT_MODEL:-qwen2.5:14b-atlas}"
+      LocalLlm__ClassifierModel: "${LOCALLLM_CLASSIFIER_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
       # Match the API: short-ish model residency so worker LLM jobs (summaries,
       # agents) don't camp VRAM on the shared 16 GB GPU while gaming, but the 14b
       # stays warm across a burst of jobs (5m, matching KeepAliveChat on the API —

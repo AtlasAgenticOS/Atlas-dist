@@ -1,8 +1,8 @@
 {
-  "version": "1.2.99",
-  "downloadUrl": "https://github.com/AtlasAgenticOS/Atlas-dist/releases/download/agent-v1.2.99/atlas-agent.exe",
-  "sha256": "9CFC1B5ED6AE6C681CFF7AB991F3A2E01C85ECF21B87DDC167ECEBF73F8BC00B",
-  "sessionDownloadUrl": "https://github.com/AtlasAgenticOS/Atlas-dist/releases/download/agent-v1.2.99/atlas-agent-session.exe",
-  "sessionSha256": "2EDCDDF9BBD2C01AEA161BB351D600CEEB84253CC0B2A1EA3FBBA5AD6DB7CE48",
-  "msiDownloadUrl": "https://github.com/AtlasAgenticOS/Atlas-dist/releases/download/agent-v1.2.99/atlas-agent-setup.msi"
+  "version": "1.2.111",
+  "downloadUrl": "https://github.com/AtlasAgenticOS/Atlas-dist/releases/download/agent-v1.2.111/atlas-agent.exe",
+  "sha256": "9CDB1FB9D0089E2245D8C9B9E771B48F4D602ED055648A6A3DA3FCD66B82DBC9",
+  "sessionDownloadUrl": "https://github.com/AtlasAgenticOS/Atlas-dist/releases/download/agent-v1.2.111/atlas-agent-session.exe",
+  "sessionSha256": "A00EDF5BF619A63A854CEED9796DA121B2ECC273A19947434D07E1D425061C4C",
+  "msiDownloadUrl": "https://github.com/AtlasAgenticOS/Atlas-dist/releases/download/agent-v1.2.111/atlas-agent-setup.msi"
 }

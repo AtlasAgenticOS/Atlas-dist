@@ -39,6 +39,8 @@ param(
     [string]$HfToken   = $env:HF_TOKEN,
     [switch]$Include3D,
     [switch]$IncludeVideo,
+    [switch]$IncludeVideo13B,   # force-fetch the 13B distilled model regardless of detected VRAM
+    [switch]$IncludeLtx2,       # force-fetch the LTX-2.3 "cinematic" set (~39GB) regardless of VRAM
     [switch]$SkipModels
 )
 $ErrorActionPreference = 'Stop'
@@ -100,14 +102,57 @@ Get-Model 'https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-sch
 Get-Model 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors' 'models\clip' 't5xxl_fp8_e4m3fn.safetensors'
 Get-Model 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors' 'models\clip' 'clip_l.safetensors'
 Get-Model 'https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors' 'models\vae' 'ae.safetensors'
+# 4x ESRGAN for the render-small-upscale-big path: targets over ~2.5 MP render at half
+# resolution then model-upscale to exact size (sharper + ~4x faster than native 4K FLUX).
+Get-Model 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth' 'models\upscale_models' 'RealESRGAN_x4plus.pth'
 # Gated (higher-quality "quality"/"high" tiers) — needs HF license + token.
 Get-Model 'https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors' 'models\unet' 'flux1-dev.safetensors' $true
 
 # Video Studio (LTX-Video) — the checkpoint goes in models/checkpoints/; it reuses the T5 encoder above.
 # Text-to-video, image-to-video, and .webm output all use NATIVE ComfyUI LTXV nodes (no custom nodes).
 if ($IncludeVideo) {
-    Step 'Downloading the LTX-Video checkpoint (Video Studio)'
-    Get-Model 'https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltx-video-2b-v0.9.5.safetensors' 'models\checkpoints' 'ltx-video-2b-v0.9.5.safetensors'
+    Step 'Video Studio (LTX-Video) - detecting GPU + fetching the models that fit'
+    # HARDWARE-AWARE: fetch the video models that suit the detected VRAM. Every threshold is overridable with
+    # -IncludeVideo13B / -IncludeLtx2 (grab a bigger model anyway - you may upgrade the GPU, or be happy to wait
+    # through heavy shared-RAM offload). The web Video Studio still lets you PICK any tier that's installed.
+    $vramMb = 0
+    try { $vramMb = [int]((& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1)) } catch {}
+    if ($vramMb -gt 0) { Ok "GPU VRAM detected: ${vramMb} MB" } else { Warn2 'no GPU VRAM detected - fetching only the small 2B model' }
+    $defaultTier = 'quick'
+
+    # Draft tier = 2B 0.9.8 DISTILLED (fp8, ~4GB) - ALWAYS. Universal (fits any GPU, even alongside a game).
+    # The proper LTX sampling pipeline (ModelSamplingLTXV + LTXVScheduler + SamplerCustom) makes it lifelike.
+    Get-Model 'https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltxv-2b-0.9.8-distilled-fp8.safetensors' 'models\checkpoints' 'ltxv-2b-0.9.8-distilled-fp8.safetensors'
+
+    # Quality tier = 13B 0.9.8 distilled (fp8, ~17GB) - runs on a ~16GB GPU when it's otherwise free (~80s).
+    # Auto on >=14GB VRAM, or force with -IncludeVideo13B.
+    if ($vramMb -ge 14000 -or $IncludeVideo13B) {
+        Get-Model 'https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltxv-13b-0.9.8-distilled-fp8.safetensors' 'models\checkpoints' 'ltxv-13b-0.9.8-distilled-fp8.safetensors'
+        $defaultTier = 'quality'
+    } else { Warn2 '13B (quality tier) skipped - needs ~14GB+ VRAM. Force with -IncludeVideo13B.' }
+
+    # Cinematic tier = LTX-2.3 (gen-2, 22B nvfp4 - the ltx.io-class lifelike model) + Gemma-3-12B encoder +
+    # distilled LoRA + two spatial upscalers (~39GB), plus the Lightricks ComfyUI-LTXVideo node pack. Needs a
+    # ~16GB Blackwell GPU (native FP4). Auto on >=15GB, or force with -IncludeLtx2.
+    if ($vramMb -ge 15000 -or $IncludeLtx2) {
+        Step 'Installing the ComfyUI-LTXVideo node pack + the LTX-2.3 set (~39GB)'
+        $ltxNode = Join-Path $comfyDir 'custom_nodes\ComfyUI-LTXVideo'
+        if (-not (Test-Path $ltxNode)) {
+            git clone --depth 1 https://github.com/Lightricks/ComfyUI-LTXVideo.git $ltxNode
+            if (Test-Path (Join-Path $ltxNode 'requirements.txt')) { & $venvPy -m pip install -r (Join-Path $ltxNode 'requirements.txt') }
+        }
+        Get-Model 'https://huggingface.co/Lightricks/LTX-2.3-nvfp4/resolve/main/ltx-2.3-22b-dev-nvfp4.safetensors' 'models\checkpoints' 'ltx-2.3-22b-dev-nvfp4.safetensors'
+        Get-Model 'https://huggingface.co/GitMylo/LTX-2-comfy_gemma_fp8_e4m3fn/resolve/main/gemma_3_12B_it_fp8_e4m3fn.safetensors' 'models\text_encoders' 'comfy_gemma_3_12B_it.safetensors'
+        Get-Model 'https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors' 'models\loras\ltxv\ltx2' 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors'
+        Get-Model 'https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors' 'models\latent_upscale_models' 'ltx-2.3-spatial-upscaler-x2-1.1.safetensors'
+        Get-Model 'https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors' 'models\latent_upscale_models' 'ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors'
+        $defaultTier = 'cinematic'
+    } else { Warn2 'LTX-2.3 (cinematic tier) skipped - needs ~16GB VRAM. Force with -IncludeLtx2 (slow via shared-RAM offload on smaller cards, but it works).' }
+
+    Write-Host ""
+    Write-Host "  Recommended default video tier for this GPU: $defaultTier" -ForegroundColor Green
+    Write-Host "  Set it as the Video Studio default with:  IMAGEGEN_VIDEO_DEFAULT_QUALITY=$defaultTier in .env" -ForegroundColor Gray
+    Write-Host "  (Every INSTALLED tier stays choosable in the UI - this only sets which is pre-selected.)" -ForegroundColor Gray
     # OPTIONAL: real .mp4 output (set image_gen:video_format=mp4) needs the VideoHelperSuite custom node +
     # ffmpeg. The default output is .webm (native SaveWEBM, no extra deps) — skip this if webm is fine.
     $vhs = Join-Path $comfyDir 'custom_nodes\ComfyUI-VideoHelperSuite'
