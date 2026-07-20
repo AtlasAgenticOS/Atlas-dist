@@ -147,6 +147,9 @@ services:
       - dataprotection-keys:/root/.aspnet/DataProtection-Keys
       - ${ATLAS_DATA_ROOT:-C:\Atlas}\cli-queue:/app/cli-queue
       - ${ATLAS_DATA_ROOT:-C:\Atlas}\secrets:/app/secrets:ro
+      # Jam Room Overdub Studio: the API writes sessions/takes/mixes under downloads\jam;
+      # the WEB container (which owns the wwwroot mount) serves them statically.
+      - ${ATLAS_DATA_ROOT:-C:\Atlas}\downloads:/app/downloads
       - ${ATLAS_DATA_ROOT:-C:\Atlas}\soul.md:/app/soul.md
       # G-c: third-party plugin drop-in folder (see ExternalPluginLoader). One subfolder per plugin.
       - ${ATLAS_DATA_ROOT:-C:\Atlas}\plugins:/app/plugins
@@ -202,6 +205,20 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    restart: unless-stopped
+
+  # ── Jam Room (BL-018, jam_room plugin) ──────────────────────────────────────
+  # Private headless Jamulus server: real-time band/karaoke. LAN players get
+  # sub-5 ms; remote players ride the DMZ (UDP 22124 reaches the host like every
+  # other port). PRIVATE by design — no --centralserver registration, so it never
+  # appears in public Jamulus directories. Recording stays off. ~zero idle cost.
+  # Self-host installs opt in with --profile jam (see docker-compose.selfhost.yml).
+  atlas-jamulus:
+    image: grundic/jamulus:latest
+    container_name: atlas-jamulus
+    command: ["--server", "--nogui", "--numchannels", "10", "--serverinfo", "Jam Room;;225", "--welcomemessage", "Welcome to the Jam Room! Be kind, take turns on lead."]
+    ports:
+      - "22124:22124/udp"
     restart: unless-stopped
 
   atlas-kokoro:

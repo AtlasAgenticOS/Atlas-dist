@@ -102,6 +102,10 @@ services:
     pull_policy: missing
   atlas-gmessages:
     pull_policy: missing
+  # Jam Room's Jamulus server is OPT-IN for self-host households (enable the jam_room
+  # plugin AND start with --profile jam). The public image needs no Atlas build.
+  atlas-jamulus:
+    profiles: ["jam"]
 
   # LevelSense sensor capture is instance-specific and NOT published to public GHCR - keep it out of the
   # default self-host install; a household that wants it opts in with --profile levelsense.
